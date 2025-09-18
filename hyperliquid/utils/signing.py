@@ -227,6 +227,15 @@ def sign_l1_action(wallet, action, active_pool, nonce, expires_after, is_mainnet
     return sign_inner(wallet, data)
 
 
+def get_l1_action_data(action, active_pool, nonce, expires_after,
+                  is_mainnet):
+    hash = action_hash(action, active_pool, nonce, expires_after)
+    phantom_agent = construct_phantom_agent(hash, is_mainnet)
+    data = l1_payload(phantom_agent)
+    structured_data = encode_typed_data(full_message=data)
+    return structured_data
+
+
 def sign_user_signed_action(wallet, action, payload_types, primary_type, is_mainnet):
     # signatureChainId is the chain used by the wallet to sign and can be any chain.
     # hyperliquidChain determines the environment and prevents replaying an action on a different chain.

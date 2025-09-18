@@ -25,6 +25,7 @@ from hyperliquid.utils.signing import (
     sign_approve_builder_fee,
     sign_convert_to_multi_sig_user_action,
     sign_l1_action,
+    get_l1_action_data,
     sign_multi_sig_action,
     sign_send_asset_action,
     sign_spot_transfer_action,
@@ -154,6 +155,33 @@ class Exchange(API):
             signature,
             timestamp,
         )
+
+    def bulk_orders_tx(self, order_requests: List[OrderRequest], builder:
+    Optional[BuilderInfo] = None) -> Any:
+        order_wires: List[OrderWire] = [
+            order_request_to_order_wire(order, self.info.name_to_asset(order["coin"])) for order in order_requests
+        ]
+        timestamp = get_timestamp_ms()
+
+        if builder:
+            builder["b"] = builder["b"].lower()
+        order_action = order_wires_to_order_action(order_wires, builder)
+
+        data = get_l1_action_data(
+            order_action,
+            self.vault_address,
+            timestamp,
+            self.expires_after,
+            self.base_url == MAINNET_API_URL,
+        )
+
+        logging.debug('bulk_orders_tx is `data`')
+        return data
+        # return self._post_action(
+        #     order_action,
+        #     signature,
+        #     timestamp,
+        # )
 
     def modify_order(
         self,
