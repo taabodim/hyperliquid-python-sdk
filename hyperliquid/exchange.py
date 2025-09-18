@@ -23,6 +23,7 @@ from hyperliquid.utils.signing import (
     order_wires_to_order_action,
     sign_agent,
     sign_approve_builder_fee,
+    get_user_signed_action,
     sign_convert_to_multi_sig_user_action,
     sign_l1_action,
     get_l1_action_data,
@@ -131,6 +132,29 @@ class Exchange(API):
             order["cloid"] = cloid
         return self.bulk_orders([order], builder)
 
+    def order_tx(
+        self,
+        name: str,
+        is_buy: bool,
+        sz: float,
+        limit_px: float,
+        order_type: OrderType,
+        reduce_only: bool = False,
+        cloid: Optional[Cloid] = None,
+        builder: Optional[BuilderInfo] = None,
+    ) -> Any:
+        order: OrderRequest = {
+            "coin": name,
+            "is_buy": is_buy,
+            "sz": sz,
+            "limit_px": limit_px,
+            "order_type": order_type,
+            "reduce_only": reduce_only,
+        }
+        if cloid:
+            order["cloid"] = cloid
+        return self.bulk_orders_tx([order], builder)
+
     def bulk_orders(self, order_requests: List[OrderRequest], builder: Optional[BuilderInfo] = None) -> Any:
         order_wires: List[OrderWire] = [
             order_request_to_order_wire(order, self.info.name_to_asset(order["coin"])) for order in order_requests
@@ -175,13 +199,8 @@ class Exchange(API):
             self.base_url == MAINNET_API_URL,
         )
 
-        logging.debug('bulk_orders_tx is `data`')
-        return data
-        # return self._post_action(
-        #     order_action,
-        #     signature,
-        #     timestamp,
-        # )
+        logging.debug("bulk_orders_tx payload: %s", data)
+        return order_action, data, timestamp
 
     def modify_order(
         self,
@@ -207,6 +226,31 @@ class Exchange(API):
             },
         }
         return self.bulk_modify_orders_new([modify])
+
+    def modify_order_tx(
+        self,
+        oid: OidOrCloid,
+        name: str,
+        is_buy: bool,
+        sz: float,
+        limit_px: float,
+        order_type: OrderType,
+        reduce_only: bool = False,
+        cloid: Optional[Cloid] = None,
+    ) -> Any:
+        modify: ModifyRequest = {
+            "oid": oid,
+            "order": {
+                "coin": name,
+                "is_buy": is_buy,
+                "sz": sz,
+                "limit_px": limit_px,
+                "order_type": order_type,
+                "reduce_only": reduce_only,
+                "cloid": cloid,
+            },
+        }
+        return self.bulk_modify_orders_new_tx([modify])
 
     def bulk_modify_orders_new(self, modify_requests: List[ModifyRequest]) -> Any:
         timestamp = get_timestamp_ms()
@@ -238,6 +282,31 @@ class Exchange(API):
             timestamp,
         )
 
+    def bulk_modify_orders_new_tx(self, modify_requests: List[ModifyRequest]) \
+            -> Any:
+        timestamp = get_timestamp_ms()
+        modify_wires = [
+            {
+                "oid": modify["oid"].to_raw() if isinstance(modify["oid"], Cloid) else modify["oid"],
+                "order": order_request_to_order_wire(modify["order"], self.info.name_to_asset(modify["order"]["coin"])),
+            }
+            for modify in modify_requests
+        ]
+
+        modify_action = {
+            "type": "batchModify",
+            "modifies": modify_wires,
+        }
+
+        data = get_l1_action_data(
+            modify_action,
+            self.vault_address,
+            timestamp,
+            self.expires_after,
+            self.base_url == MAINNET_API_URL,
+        )
+        return modify_action, data, timestamp
+
     def market_open(
         self,
         name: str,
@@ -252,6 +321,23 @@ class Exchange(API):
         px = self._slippage_price(name, is_buy, slippage, px)
         # Market Order is an aggressive Limit Order IoC
         return self.order(
+            name, is_buy, sz, px, order_type={"limit": {"tif": "Ioc"}}, reduce_only=False, cloid=cloid, builder=builder
+        )
+
+    def market_open_tx(
+        self,
+        name: str,
+        is_buy: bool,
+        sz: float,
+        px: Optional[float] = None,
+        slippage: float = DEFAULT_SLIPPAGE,
+        cloid: Optional[Cloid] = None,
+        builder: Optional[BuilderInfo] = None,
+    ) -> Any:
+        # Get aggressive Market Price
+        px = self._slippage_price(name, is_buy, slippage, px)
+        # Market Order is an aggressive Limit Order IoC
+        return self.order_tx(
             name, is_buy, sz, px, order_type={"limit": {"tif": "Ioc"}}, reduce_only=False, cloid=cloid, builder=builder
         )
 
@@ -292,11 +378,54 @@ class Exchange(API):
                 builder=builder,
             )
 
+    def market_close_tx(
+        self,
+        coin: str,
+        sz: Optional[float] = None,
+        px: Optional[float] = None,
+        slippage: float = DEFAULT_SLIPPAGE,
+        cloid: Optional[Cloid] = None,
+        builder: Optional[BuilderInfo] = None,
+    ) -> Any:
+        address: str = self.wallet.address
+        if self.account_address:
+            address = self.account_address
+        if self.vault_address:
+            address = self.vault_address
+        positions = self.info.user_state(address)["assetPositions"]
+        for position in positions:
+            item = position["position"]
+            if coin != item["coin"]:
+                continue
+            szi = float(item["szi"])
+            if not sz:
+                sz = abs(szi)
+            is_buy = True if szi < 0 else False
+            # Get aggressive Market Price
+            px = self._slippage_price(coin, is_buy, slippage, px)
+            # Market Order is an aggressive Limit Order IoC
+            return self.order_tx(
+                coin,
+                is_buy,
+                sz,
+                px,
+                order_type={"limit": {"tif": "Ioc"}},
+                reduce_only=True,
+                cloid=cloid,
+                builder=builder,
+            )
+
     def cancel(self, name: str, oid: int) -> Any:
         return self.bulk_cancel([{"coin": name, "oid": oid}])
 
+    def cancel_tx(self, name: str, oid: int) -> Any:
+        return self.bulk_cancel_tx([{"coin": name, "oid": oid}])
+
     def cancel_by_cloid(self, name: str, cloid: Cloid) -> Any:
         return self.bulk_cancel_by_cloid([{"coin": name, "cloid": cloid}])
+
+    def cancel_by_cloid_tx(self, name: str, cloid: Cloid) -> Any:
+        return self.bulk_cancel_by_cloid_tx([{"coin": name, "cloid": cloid}])
 
     def bulk_cancel(self, cancel_requests: List[CancelRequest]) -> Any:
         timestamp = get_timestamp_ms()
@@ -324,6 +453,28 @@ class Exchange(API):
             signature,
             timestamp,
         )
+
+    def bulk_cancel_tx(self, cancel_requests: List[CancelRequest]) -> Any:
+        timestamp = get_timestamp_ms()
+        cancel_action = {
+            "type": "cancel",
+            "cancels": [
+                {
+                    "a": self.info.name_to_asset(cancel["coin"]),
+                    "o": cancel["oid"],
+                }
+                for cancel in cancel_requests
+            ],
+        }
+        data = get_l1_action_data(
+            cancel_action,
+            self.vault_address,
+            timestamp,
+            self.expires_after,
+            self.base_url == MAINNET_API_URL,
+        )
+
+        return cancel_action, data, timestamp
 
     def bulk_cancel_by_cloid(self, cancel_requests: List[CancelByCloidRequest]) -> Any:
         timestamp = get_timestamp_ms()
@@ -353,6 +504,30 @@ class Exchange(API):
             timestamp,
         )
 
+    def bulk_cancel_by_cloid_tx(self, cancel_requests: List[
+        CancelByCloidRequest]) -> Any:
+        timestamp = get_timestamp_ms()
+
+        cancel_action = {
+            "type": "cancelByCloid",
+            "cancels": [
+                {
+                    "asset": self.info.name_to_asset(cancel["coin"]),
+                    "cloid": cancel["cloid"].to_raw(),
+                }
+                for cancel in cancel_requests
+            ],
+        }
+        data = get_l1_action_data(
+            cancel_action,
+            self.vault_address,
+            timestamp,
+            self.expires_after,
+            self.base_url == MAINNET_API_URL,
+        )
+
+        return cancel_action, data, timestamp
+
     def schedule_cancel(self, time: Optional[int]) -> Any:
         """Schedules a time (in UTC millis) to cancel all open orders. The time must be at least 5 seconds after the current time.
         Once the time comes, all open orders will be canceled and a trigger count will be incremented. The max number of triggers
@@ -381,6 +556,29 @@ class Exchange(API):
             timestamp,
         )
 
+    def schedule_cancel_tx(self, time: Optional[int]) -> Any:
+        """Schedules a time (in UTC millis) to cancel all open orders. The time must be at least 5 seconds after the current time.
+        Once the time comes, all open orders will be canceled and a trigger count will be incremented. The max number of triggers
+        per day is 10. This trigger count is reset at 00:00 UTC.
+
+        Args:
+            time (int): if time is not None, then set the cancel time in the future. If None, then unsets any cancel time in the future.
+        """
+        timestamp = get_timestamp_ms()
+        schedule_cancel_action: ScheduleCancelAction = {
+            "type": "scheduleCancel",
+        }
+        if time is not None:
+            schedule_cancel_action["time"] = time
+        data = get_l1_action_data(
+            schedule_cancel_action,
+            self.vault_address,
+            timestamp,
+            self.expires_after,
+            self.base_url == MAINNET_API_URL,
+        )
+        return schedule_cancel_action, data, timestamp
+
     def update_leverage(self, leverage: int, name: str, is_cross: bool = True) -> Any:
         timestamp = get_timestamp_ms()
         update_leverage_action = {
@@ -402,6 +600,24 @@ class Exchange(API):
             signature,
             timestamp,
         )
+
+    def update_leverage_tx(self, leverage: int, name: str, is_cross: bool =
+    True) -> Any:
+        timestamp = get_timestamp_ms()
+        update_leverage_action = {
+            "type": "updateLeverage",
+            "asset": self.info.name_to_asset(name),
+            "isCross": is_cross,
+            "leverage": leverage,
+        }
+        data = get_l1_action_data(
+            update_leverage_action,
+            self.vault_address,
+            timestamp,
+            self.expires_after,
+            self.base_url == MAINNET_API_URL,
+        )
+        return update_leverage_action, data, timestamp
 
     def update_isolated_margin(self, amount: float, name: str) -> Any:
         timestamp = get_timestamp_ms()
@@ -425,6 +641,24 @@ class Exchange(API):
             signature,
             timestamp,
         )
+
+    def update_isolated_margin_tx(self, amount: float, name: str) -> Any:
+        timestamp = get_timestamp_ms()
+        amount = float_to_usd_int(amount)
+        update_isolated_margin_action = {
+            "type": "updateIsolatedMargin",
+            "asset": self.info.name_to_asset(name),
+            "isBuy": True,
+            "ntli": amount,
+        }
+        data = get_l1_action_data(
+            update_isolated_margin_action,
+            self.vault_address,
+            timestamp,
+            self.expires_after,
+            self.base_url == MAINNET_API_URL,
+        )
+        return update_isolated_margin_action, data, timestamp
 
     def set_referrer(self, code: str) -> Any:
         timestamp = get_timestamp_ms()
@@ -657,6 +891,13 @@ class Exchange(API):
         action = {"maxFeeRate": max_fee_rate, "builder": builder, "nonce": timestamp, "type": "approveBuilderFee"}
         signature = sign_approve_builder_fee(self.wallet, action, self.base_url == MAINNET_API_URL)
         return self._post_action(action, signature, timestamp)
+
+    def approve_builder_fee_tx(self, builder: str, max_fee_rate: str) -> Any:
+        timestamp = get_timestamp_ms()
+
+        action = {"maxFeeRate": max_fee_rate, "builder": builder, "nonce": timestamp, "type": "approveBuilderFee"}
+        data = get_user_signed_action(action, self.base_url == MAINNET_API_URL)
+        return action, data, timestamp
 
     def convert_to_multi_sig_user(self, authorized_users: List[str], threshold: int) -> Any:
         timestamp = get_timestamp_ms()

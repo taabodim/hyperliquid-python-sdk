@@ -245,6 +245,17 @@ def sign_user_signed_action(wallet, action, payload_types, primary_type, is_main
     return sign_inner(wallet, data)
 
 
+def get_user_signed_action(action, payload_types, primary_type,
+                         is_mainnet):
+    # signatureChainId is the chain used by the wallet to sign and can be any chain.
+    # hyperliquidChain determines the environment and prevents replaying an action on a different chain.
+    action["signatureChainId"] = "0x66eee"
+    action["hyperliquidChain"] = "Mainnet" if is_mainnet else "Testnet"
+    data = user_signed_payload(primary_type, payload_types, action)
+    structured_data = encode_typed_data(full_message=data)
+    return structured_data
+
+
 def add_multi_sig_types(sign_types):
     enriched_sign_types = []
     enriched = False
